@@ -1,17 +1,20 @@
 use core::{convert::Into, fmt::Debug, option::Option, result::Result::Ok};
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::time::{Duration, sleep};
 
 trait Repository {
     type Item;
     type Id;
     type Error;
 
-    fn get(&self, id: &Self::Id) -> Result<Option<&Self::Item>, Self::Error>;
-    fn set(&mut self, id: Self::Id, item: Self::Item) -> Result<Self::Id, Self::Error>;
-    fn delete(&mut self, id: &Self::Id) -> Result<bool, Self::Error>;
+    async fn get(&self, id: &Self::Id) -> Result<Option<Self::Item>, Self::Error>;
+    async fn set(&self, id: Self::Id, item: Self::Item) -> Result<Self::Id, Self::Error>;
+    async fn delete(&self, id: &Self::Id) -> Result<bool, Self::Error>;
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct Employee {
     name: String,
     age: u64,
@@ -19,13 +22,13 @@ struct Employee {
 }
 
 struct Memorycache {
-    store: HashMap<u64, Employee>,
+    store: Mutex<HashMap<u64, Employee>>,
 }
 
 impl Memorycache {
     fn new() -> Self {
         Memorycache {
-            store: HashMap::new(),
+            store: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -35,23 +38,27 @@ impl Repository for Memorycache {
     type Item = Employee;
     type Error = std::convert::Infallible;
 
-    fn set(&mut self, id: Self::Id, item: Self::Item) -> Result<Self::Id, Self::Error> {
+    async fn set(&self, id: Self::Id, item: Self::Item) -> Result<Self::Id, Self::Error> {
+        sleep(Duration::from_millis(50)).await;
         let id = id;
-        self.store.insert(id, item);
+        self.store.lock().await.insert(id, item);
         Ok(id.clone())
     }
 
-    fn get(&self, id: &Self::Id) -> Result<Option<&Self::Item>, Self::Error> {
-        Ok(self.store.get(id))
+    async fn get(&self, id: &Self::Id) -> Result<Option<Self::Item>, Self::Error> {
+        sleep(Duration::from_millis(50)).await;
+        let guard = self.store.lock().await;
+        Ok(guard.get(id).cloned())
     }
 
-    fn delete(&mut self, id: &Self::Id) -> Result<bool, Self::Error> {
-        Ok(self.store.remove(id).is_some())
+    async fn delete(&self, id: &Self::Id) -> Result<bool, Self::Error> {
+        sleep(Duration::from_millis(50)).await;
+        Ok(self.store.lock().await.remove(id).is_some())
     }
 }
 
-fn create_and_fetch<R: Repository<Id = u64, Item = Employee>>(
-    repo: &mut R,
+async fn create_and_fetch<R: Repository<Id = u64, Item = Employee>>(
+    repo: &R,
     id: u64,
     value: Employee,
 ) -> Result<(), R::Error>
@@ -60,25 +67,48 @@ where
     R::Id: std::fmt::Debug,
     R::Error: std::fmt::Debug,
 {
-    let inserted_id = repo.set(id, value)?;
+    let inserted_id = repo.set(id, value).await?;
     print!("Inserted id: {inserted_id:?}\n");
-    let recieved_value = repo.get(&inserted_id)?;
+    let recieved_value = repo.get(&inserted_id).await?;
     let emp = recieved_value.unwrap();
-    print!("recieved: {emp:?}");
+    print!("recieved: {emp:?}\n");
     Ok(())
 }
 
-fn main() {
-    let mut repo = Memorycache::new();
-    let id = 1;
-    create_and_fetch(
-        &mut repo,
-        id,
-        Employee {
-            name: "Ayush".into(),
-            age: 21,
-            email: "andy.ayushverma@gmail.com".into(),
-        },
-    )
-    .unwrap();
+#[tokio::main]
+async fn main() {
+    let mut repo = Arc::new(Memorycache::new());
+    let repo_c1 = Arc::clone(&repo);
+    let repo_c2 = Arc::clone(&repo);
+    let id_1 = 1;
+    let id_2 = 2;
+    let t1 = tokio::spawn(async move {
+        create_and_fetch(
+            &*repo_c1,
+            id_1,
+            Employee {
+                name: "Ayush".into(),
+                age: 21,
+                email: "andy.ayushverma@gmail.com".into(),
+            },
+        )
+        .await
+        .unwrap();
+    });
+    let t2 = tokio::spawn(async move {
+        create_and_fetch(
+            &*repo_c2,
+            id_2,
+            Employee {
+                name: "Verma".into(),
+                age: 21,
+                email: "andy.ayushverma@gmail.com".into(),
+            },
+        )
+        .await
+        .unwrap();
+    });
+
+    t1.await.unwrap();
+    t2.await.unwrap();
 }
